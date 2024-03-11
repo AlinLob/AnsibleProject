@@ -1,0 +1,146 @@
+---
+
+- name: AnsibleProject
+  hosts: all
+  become: yes
+  vars:
+    my_name: "Лобова Алина Алексеевна"
+    my_group_number: "2102"
+    my_letter: "д" 
+    stud_template: "/home/ansible-worker/www/stud-template/"
+    nginx_conf_path: "/etc/nginx/sites-available/ansible.iphilka.ru.conf"
+    users:
+      - ansible-worker
+  
+
+  tasks:
+
+    - name: Create user
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: present
+        shell: /bin/bash
+        createhome: yes
+      loop: "{{ users }}"
+      tags: create_user
+
+    - name: Install Git
+      ansible.builtin.package:
+        name: git
+        state: latest
+      tags: install_git
+
+    - name: Copy SSH keys
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "./ssh_keys/id_rsa", dest: "~/.ssh/id_rsa", mode: '0600' }
+        - { src: "./ssh_keys/id_rsa.pub", dest: "~/.ssh/id_rsa.pub", mode: '0644' }
+      tags:
+        - git_installation
+
+    - name: Set authorized key taken from file
+      ansible.posix.authorized_key:
+        user: "{{ item }}"
+        state: present
+        key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+      loop: "{{ users }}"
+      tags: authorized_key
+
+    - name: Clone repository
+      ansible.builtin.git:
+        repo: "https://github.com/iphilka/stud-template.git"
+        dest: "/home/ansible-worker/www/"
+        clone: yes
+        update: no
+      tags: clone_repo
+
+    - name: Update package lists
+      ansible.builtin.apt:
+        update_cache: yes
+      tags: update_packages
+ 
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: latest
+      tags: nginx_editing
+
+    - name: Ensure destination directory exists
+      ansible.builtin.file:
+        path: "{{ stud_template }}"
+        state: directory
+      tags: git_clone
+
+    - name: Copy index.html file
+      ansible.builtin.template:
+        src: "./templates/index.html.j2"
+        dest: "{{ stud_template }}/index.html"
+      tags: nginx_editing
+
+    - name: Set permissions for HTML file and parent directory
+      ansible.builtin.file:
+        path: "{{ stud_template }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+      tags: nginx_editing
+
+    - name: Set permissions for HTML file
+      ansible.builtin.file:
+        path: "{{ stud_template }}/index.html"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+      tags: nginx_editing
+    
+    - name: Set permissions for www directory
+      ansible.builtin.file:
+        path: "/home/ansible-worker/www/"
+        owner: www-data
+        group: www-data
+        mode: '0755'
+      tags: nginx_editing
+
+    - name: Set execute permissions for stud-template directory and parent directories
+      ansible.builtin.shell:
+        cmd: |
+          sudo chmod +r /home/ansible-worker/www/stud-template/
+          sudo chmod +rx /home/ansible-worker/
+          sudo chown -R www-data:www-data /home/ansible-worker/www/
+  
+
+    - name: Create Nginx configuration file
+      ansible.builtin.template:
+        src: "./templates/ansible.iphilka.ru.conf.j2"
+        dest: "{{ nginx_conf_path }}"
+      notify: Restart Nginx
+      tags: nginx_editing
+
+    - name: Unlink existing default file
+      ansible.builtin.command:
+        cmd: unlink /etc/nginx/sites-enabled/default
+      ignore_errors: true
+      tags: nginx_editing
+
+    - name: Create symbolic link to /dev/null for default file
+      ansible.builtin.command:
+        cmd: ln -s /dev/null /etc/nginx/sites-enabled/default
+      tags: nginx_editing
+
+    - name: Enable Nginx site
+      ansible.builtin.file:
+        src: "{{ nginx_conf_path }}"
+        dest: "/etc/nginx/sites-enabled/ansible.iphilka.ru.conf"
+        state: link
+      tags: nginx_editing
+
+
+  handlers:
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
